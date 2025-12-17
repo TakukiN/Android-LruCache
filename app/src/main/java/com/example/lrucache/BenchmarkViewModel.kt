@@ -56,15 +56,6 @@ class BenchmarkViewModel : ViewModel() {
             )
 
             try {
-                // サンプル画像を読み込み
-                val originalBitmap = withContext(Dispatchers.IO) {
-                    loadSampleImage(context)
-                }
-
-                Log.i(TAG, "元画像サイズ: ${originalBitmap.width}x${originalBitmap.height}")
-
-                _state.value = _state.value.copy(originalBitmap = originalBitmap)
-
                 val results = mutableListOf<BenchmarkResult>()
 
                 // 1. 超解像処理のベンチマーク
@@ -72,8 +63,8 @@ class BenchmarkViewModel : ViewModel() {
                     currentProcess = "超解像処理 (2x)",
                     progress = 0.1f
                 )
-                val superResResult = benchmarkProcessRealistic(
-                    originalBitmap,
+                val superResResult = benchmarkWithSourceImageCache(
+                    context,
                     "超解像 (2x)",
                     iterations
                 ) { bitmap ->
@@ -87,8 +78,8 @@ class BenchmarkViewModel : ViewModel() {
                     currentProcess = "シャープネス処理",
                     progress = 0.5f
                 )
-                val sharpenResult = benchmarkProcessRealistic(
-                    originalBitmap,
+                val sharpenResult = benchmarkWithSourceImageCache(
+                    context,
                     "シャープネス",
                     iterations
                 ) { bitmap ->
@@ -102,8 +93,8 @@ class BenchmarkViewModel : ViewModel() {
                     currentProcess = "ガウシアンブラー処理",
                     progress = 0.8f
                 )
-                val blurResult = benchmarkProcessRealistic(
-                    originalBitmap,
+                val blurResult = benchmarkWithSourceImageCache(
+                    context,
                     "ガウシアンブラー",
                     iterations
                 ) { bitmap ->
@@ -111,13 +102,15 @@ class BenchmarkViewModel : ViewModel() {
                 }
                 results.add(blurResult)
 
-                // 最後に処理された画像を保存（超解像の結果を表示）
+                // 表示用に画像を取得
+                val originalBitmap = loadSampleImageFromFile(context)
                 val lastProcessed = ImageProcessor.superResolution2x(originalBitmap)
 
                 _state.value = _state.value.copy(
                     isRunning = false,
                     progress = 1f,
                     results = results,
+                    originalBitmap = originalBitmap,
                     processedBitmap = lastProcessed,
                     currentProcess = "完了"
                 )
@@ -126,14 +119,19 @@ class BenchmarkViewModel : ViewModel() {
                 Log.i(TAG, "========== ベンチマーク結果 ==========")
                 Log.i(TAG, "画像サイズ: ${originalBitmap.width}x${originalBitmap.height}")
                 Log.i(TAG, "繰り返し回数: $iterations")
+                Log.i(TAG, "")
+                Log.i(TAG, "【測定内容】")
+                Log.i(TAG, "キャッシュなし: 毎回ファイルから画像読み込み → 画像処理")
+                Log.i(TAG, "キャッシュあり: LruCacheから画像取得 → 画像処理")
+                Log.i(TAG, "※ 画像処理は両方とも毎回実行")
+                Log.i(TAG, "")
                 results.forEach { result ->
                     Log.i(TAG, "-----------------------------------")
                     Log.i(TAG, "処理: ${result.processType}")
-                    Log.i(TAG, "キャッシュなし（毎回処理）: ${result.withoutCacheTime}ms")
-                    Log.i(TAG, "キャッシュあり（2回目以降ヒット）: ${result.withCacheTime}ms")
-                    Log.i(TAG, "高速化倍率: ${String.format("%.1f", result.speedupRatio)}倍")
+                    Log.i(TAG, "キャッシュなし（ファイル読込+処理）: ${result.withoutCacheTime}ms")
+                    Log.i(TAG, "キャッシュあり（メモリ読込+処理）: ${result.withCacheTime}ms")
+                    Log.i(TAG, "高速化倍率: ${String.format("%.2f", result.speedupRatio)}倍")
                     Log.i(TAG, "節約時間: ${result.savedTime}ms")
-                    Log.i(TAG, "キャッシュヒット率: ${String.format("%.0f", result.cacheHitRate * 100)}%")
                 }
                 val totalSaved = results.sumOf { it.savedTime }
                 val avgSpeedup = results.map { it.speedupRatio }.average()
@@ -153,65 +151,68 @@ class BenchmarkViewModel : ViewModel() {
     }
 
     /**
-     * より現実的なベンチマーク
-     * - キャッシュなし: 毎回新規に処理を実行
-     * - キャッシュあり: 同じキーでアクセスし、キャッシュヒット時はスキップ
+     * 元画像のキャッシュ効果を測定するベンチマーク
      *
-     * これは「同じ画像を繰り返し処理するシナリオ」での効果を測定
+     * - キャッシュなし: 毎回ファイルから画像を読み込み → 画像処理実行
+     * - キャッシュあり: LruCacheから元画像を取得 → 画像処理実行
+     *
+     * ※ 画像処理自体は両方とも毎回実行する
      */
-    private suspend fun benchmarkProcessRealistic(
-        bitmap: Bitmap,
+    private suspend fun benchmarkWithSourceImageCache(
+        context: Context,
         processName: String,
         iterations: Int,
         process: (Bitmap) -> Bitmap
     ): BenchmarkResult = withContext(Dispatchers.Default) {
-        val cacheKey = "${processName}_${bitmap.width}x${bitmap.height}"
+        val cacheKey = "source_image"
 
-        // ========== キャッシュなしの処理時間を測定 ==========
-        // 毎回新規に処理を実行（キャッシュを使わない）
+        // ========== キャッシュなし: 毎回ファイルから読み込み ==========
         cacheManager.clearCache()
 
         var totalTimeWithoutCache = 0L
         for (i in 0 until iterations) {
             val startTime = System.nanoTime()
-            val result = process(bitmap) // 毎回処理を実行
+
+            // 毎回ファイルから画像を読み込み
+            val bitmap = withContext(Dispatchers.IO) {
+                loadSampleImageFromFile(context)
+            }
+            // 画像処理を実行
+            val result = process(bitmap)
+
             val endTime = System.nanoTime()
             totalTimeWithoutCache += (endTime - startTime)
-            // 結果は使い捨て（キャッシュに保存しない）
-        }
-        val avgWithoutCache = totalTimeWithoutCache / iterations / 1_000_000 // ミリ秒に変換
 
-        // ========== キャッシュありの処理時間を測定 ==========
-        // 同じキーで繰り返しアクセス（初回はミス、2回目以降はヒット）
+            // 結果は使い捨て
+        }
+        val avgWithoutCache = totalTimeWithoutCache / iterations / 1_000_000
+
+        // ========== キャッシュあり: LruCacheから元画像を取得 ==========
         cacheManager.clearCache()
 
-        var totalTimeWithCache = 0L
-        var processedResult: Bitmap? = null
+        // 最初に元画像をキャッシュに配置
+        val sourceImage = withContext(Dispatchers.IO) {
+            loadSampleImageFromFile(context)
+        }
+        cacheManager.addBitmapToCache(cacheKey, sourceImage)
 
+        var totalTimeWithCache = 0L
         for (i in 0 until iterations) {
             val startTime = System.nanoTime()
 
-            // キャッシュを確認
-            val cached = cacheManager.getBitmapFromCache(cacheKey)
-            processedResult = if (cached != null) {
-                // キャッシュヒット - 処理をスキップ
-                cached
-            } else {
-                // キャッシュミス - 処理を実行してキャッシュに保存
-                process(bitmap).also { result ->
-                    cacheManager.addBitmapToCache(cacheKey, result)
-                }
-            }
+            // LruCacheから元画像を取得
+            val bitmap = cacheManager.getBitmapFromCache(cacheKey)!!
+            // 画像処理を実行（毎回実行）
+            val result = process(bitmap)
 
             val endTime = System.nanoTime()
             totalTimeWithCache += (endTime - startTime)
+
+            // 結果は使い捨て
         }
-        val avgWithCache = totalTimeWithCache / iterations / 1_000_000 // ミリ秒に変換
+        val avgWithCache = totalTimeWithCache / iterations / 1_000_000
 
-        val stats = cacheManager.getCacheStats()
-
-        // キャッシュヒット率 = (iterations - 1) / iterations （初回はミス）
-        val hitRate = if (iterations > 1) (iterations - 1).toFloat() / iterations else 0f
+        Log.i(TAG, "$processName: ファイル読込=${avgWithoutCache}ms, キャッシュ=${avgWithCache}ms")
 
         BenchmarkResult(
             processType = processName,
@@ -219,39 +220,23 @@ class BenchmarkViewModel : ViewModel() {
             withoutCacheTime = avgWithoutCache,
             iterations = iterations,
             imageName = "sample",
-            cacheHitRate = hitRate
+            cacheHitRate = 1.0f // キャッシュありは常にヒット
         )
     }
 
-    private fun loadSampleImage(context: Context): Bitmap {
-        // assetsから画像を読み込む
+    /**
+     * ファイルから画像を読み込む（キャッシュを使わない）
+     */
+    private fun loadSampleImageFromFile(context: Context): Bitmap {
         return try {
-            // まずPNGを試す
             context.assets.open("sample.png").use { inputStream ->
-                val options = BitmapFactory.Options().apply {
-                    // 画像が大きすぎる場合はサンプリング
-                    inJustDecodeBounds = true
-                }
-                BitmapFactory.decodeStream(inputStream, null, options)
-
-                // リセットしてから再度読み込み
-                inputStream.reset()
-
-                val sampleSize = calculateInSampleSize(options, 512, 512)
-                val decodeOptions = BitmapFactory.Options().apply {
-                    inSampleSize = sampleSize
-                }
-
-                context.assets.open("sample.png").use { stream ->
-                    BitmapFactory.decodeStream(stream, null, decodeOptions)
-                } ?: createSampleBitmap()
-            }
+                BitmapFactory.decodeStream(inputStream)
+            } ?: createSampleBitmap()
         } catch (e: Exception) {
             try {
-                // JPGを試す
                 context.assets.open("sample.jpg").use { inputStream ->
-                    BitmapFactory.decodeStream(inputStream) ?: createSampleBitmap()
-                }
+                    BitmapFactory.decodeStream(inputStream)
+                } ?: createSampleBitmap()
             } catch (e2: Exception) {
                 Log.w(TAG, "サンプル画像が見つからないため、生成画像を使用します")
                 createSampleBitmap()
@@ -259,24 +244,7 @@ class BenchmarkViewModel : ViewModel() {
         }
     }
 
-    private fun calculateInSampleSize(options: BitmapFactory.Options, reqWidth: Int, reqHeight: Int): Int {
-        val (height: Int, width: Int) = options.outHeight to options.outWidth
-        var inSampleSize = 1
-
-        if (height > reqHeight || width > reqWidth) {
-            val halfHeight: Int = height / 2
-            val halfWidth: Int = width / 2
-
-            while (halfHeight / inSampleSize >= reqHeight && halfWidth / inSampleSize >= reqWidth) {
-                inSampleSize *= 2
-            }
-        }
-
-        return inSampleSize
-    }
-
     private fun createSampleBitmap(): Bitmap {
-        // テスト用のグラデーション画像を生成（256x256）
         val width = 256
         val height = 256
         val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)

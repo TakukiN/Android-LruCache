@@ -320,7 +320,7 @@ fun ResultCard(result: BenchmarkResult) {
             ) {
                 Column {
                     Text(
-                        text = "キャッシュなし",
+                        text = "ファイル読込+処理",
                         style = MaterialTheme.typography.labelMedium,
                         color = Color.Gray
                     )
@@ -333,7 +333,7 @@ fun ResultCard(result: BenchmarkResult) {
 
                 Column(horizontalAlignment = Alignment.End) {
                     Text(
-                        text = "キャッシュあり",
+                        text = "キャッシュ+処理",
                         style = MaterialTheme.typography.labelMedium,
                         color = Color.Gray
                     )
@@ -399,7 +399,7 @@ fun ResultCard(result: BenchmarkResult) {
             )
 
             Text(
-                text = "キャッシュヒット率: ${String.format("%.0f", result.cacheHitRate * 100)}%",
+                text = "※ 画像処理は両方とも毎回実行",
                 style = MaterialTheme.typography.bodySmall,
                 color = Color.Gray
             )
